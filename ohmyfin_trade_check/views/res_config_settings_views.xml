@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_config_settings_view_form" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.inherit.ohmyfin_trade_check</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="base.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//form" position="inside">
+                <app string="Sanctions &amp; Export Check" data-string="Sanctions &amp; Export Check" name="ohmyfin_trade_check" groups="base.group_system">
+                    <block title="Ohmyfin account" name="ohmyfin_account">
+                        <setting id="ohmyfin_api_key_setting" string="API key" help="The checks are answered by the Ohmyfin API, an external service. Paste the production key of your Ohmyfin account.">
+                            <field name="ohmyfin_api_key" password="True"/>
+                            <div class="mt-2">
+                                <a href="https://app.ohmyfin.ai/profile/api" target="_blank">Get a key</a>
+                            </div>
+                        </setting>
+                        <setting id="ohmyfin_consent_setting" help="Sent to Ohmyfin: contact names and countries, the delivery country, and each product's HS code and country of origin. No prices, quantities or documents. Nothing is sent until this box is ticked and a key is saved.">
+                            <field name="ohmyfin_consent"/>
+                        </setting>
+                        <setting id="ohmyfin_base_url_setting" string="API address" help="Leave as it is unless Ohmyfin support asks you to change it.">
+                            <field name="ohmyfin_base_url"/>
+                        </setting>
+                    </block>
+                    <block title="Checks" name="ohmyfin_checks">
+                        <setting id="ohmyfin_auto_screen_setting" help="Screen a company or person when it is created, and again when its name, type or country changes.">
+                            <field name="ohmyfin_auto_screen"/>
+                        </setting>
+                        <setting id="ohmyfin_refuse_setting" help="When the service cannot answer (timeout, outage, the day's allowance used up), an order or payment goes through with &quot;not screened&quot; and the reason in the chatter. Tick this to make it wait instead.">
+                            <field name="ohmyfin_refuse_when_unavailable"/>
+                        </setting>
+                    </block>
+                </app>
+            </xpath>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,117 @@
+<section class="container">
+  <div class="row">
+    <div class="col-md-12 text-center mt-4 mb-4">
+      <h2 style="color: #1f2a44; font-weight: 600;">Sanctions &amp; Export Check</h2>
+      <p class="lead">
+        Checks every sales order before you confirm it: the customer, the destination and the goods.
+      </p>
+      <p>
+        The customer and the delivery address are screened against sanctions lists, the delivery
+        country against embargoes and the Russia rules, and every order line against export
+        controls by its HS code. Odoo already holds all three, so nobody types anything.
+      </p>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-md-12 mb-4">
+      <img src="order_check_screenshot.png" class="img-fluid border" alt="The check on a sales order, a goods line flagged"/>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-md-4 mb-4">
+      <h4>The party</h4>
+      <p>
+        The customer and the ship-to name, screened against more than 300 sanctions lists, among
+        them OFAC SDN, the EU consolidated list,
+        UK OFSI and the UN lists. A result reads "No match on N lists, with the date", "Potential
+        match" or "Listed".
+      </p>
+    </div>
+    <div class="col-md-4 mb-4">
+      <h4>The destination</h4>
+      <p>
+        The delivery country, against embargoes and country export restrictions. For an EU seller,
+        a buyer outside the EU's partner countries is where the Russia rules of Regulation 833/2014
+        apply.
+      </p>
+    </div>
+    <div class="col-md-4 mb-4">
+      <h4>The goods</h4>
+      <p>
+        Every order line by the product's HS code and country of origin, against export controls
+        and dual-use lists. Common high priority (CHP) items to a country outside the partner list are flagged for the due
+        diligence Art. 12gb asks for, with the Art. 12g no-re-export clause as the action.
+      </p>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-md-12 mb-4">
+      <h3>What happens on each result</h3>
+      <table class="table table-sm table-bordered">
+        <thead>
+          <tr><th>Result on the order</th><th>What Odoo does</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Listed party, embargoed destination or prohibited goods</td><td>Confirm is refused, with the reason on the order.</td></tr>
+          <tr><td>Potential match, licence may be required, or a CHP item to a diversion-risk country</td><td>The order waits until a user in the group "Ohmyfin: compliance reviewer" records a written reason. The reason and the report id go to the chatter.</td></tr>
+          <tr><td>An order line without an HS code</td><td>Shown as "not goods-screened", never as a pass, with a link to the products that miss a code.</td></tr>
+          <tr><td>The check cannot run (timeout, quota)</td><td>The order goes through with "not screened" and the reason in the chatter, unless you switch on "refuse when the check cannot run".</td></tr>
+        </tbody>
+      </table>
+      <p>
+        A goods result is a flag to check the item's classification. It is never a licence
+        determination: an HS code does not decide a dual-use control, the item's technical
+        parameters do.
+      </p>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-md-6 mb-4">
+      <img src="reviewer_reason_screenshot.png" class="img-fluid border" alt="A reviewer records the reason that releases a waiting order"/>
+    </div>
+    <div class="col-md-6 mb-4">
+      <h3>Also in the app</h3>
+      <ul>
+        <li><strong>Contacts:</strong> a Screen button and a status badge on every company and person, re-screened when the name, type or country changes.</li>
+        <li><strong>Outgoing payments:</strong> a listed vendor is refused at posting, a potential match waits for a reviewer.</li>
+        <li><strong>Vendor bank accounts:</strong> the BIC is looked up when it is saved, with the bank's name and country, and a warning when the BIC is unknown or its country differs from the IBAN's.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-md-12 mb-4">
+      <h3>What it needs, and what it sends</h3>
+      <ul>
+        <li>
+          <strong>An Ohmyfin account and API key.</strong> The checks are answered by Ohmyfin's API,
+          an external service. The module is free to install and its code runs without a key; with
+          no key and no consent it sends nothing.
+        </li>
+        <li>
+          <strong>Your consent first.</strong> Nothing leaves your database until an administrator
+          saves the key and ticks the consent box in Settings, which names what is sent: contact
+          names and countries, the delivery country, and each product's HS code and country of
+          origin. No prices, quantities or documents are sent.
+        </li>
+        <li>
+          <strong>Limits.</strong> 10 checks a day with a free Ohmyfin account, 100 a day on any paid
+          Ohmyfin plan. Screening all contacts at once and daily monitoring come with the Corporate
+          plan.
+        </li>
+        <li>
+          <strong>Where it runs.</strong> Odoo 18.0, 19.0 and 20.0, Community and Enterprise,
+          on-premise and Odoo.sh. Not Odoo Online, which does not install third-party apps. The goods
+          check reads the product's "HS Code" and "Origin of Goods" fields, which Odoo adds with its
+          shipping features (the Delivery app); without them the module checks the party and the
+          destination, and each line reads "not goods-screened".
+        </li>
+      </ul>
+    </div>
+  </div>
+
+</section>

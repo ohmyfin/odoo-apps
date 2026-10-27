@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_account_payment_form_ohmyfin" model="ir.ui.view">
+        <field name="name">account.payment.form.ohmyfin_trade_check</field>
+        <field name="model">account.payment</field>
+        <field name="inherit_id" ref="account.view_account_payment_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <group string="Payee sanctions screen (Ohmyfin)" name="ohmyfin_guard" invisible="ohmyfin_guard_state == 'none'">
+                    <group>
+                        <field name="ohmyfin_guard_state"/>
+                        <field name="ohmyfin_payee_badge"/>
+                        <field name="ohmyfin_guard_reason" invisible="not ohmyfin_guard_reason"/>
+                    </group>
+                    <group groups="ohmyfin_trade_check.group_compliance_reviewer" invisible="ohmyfin_guard_state != 'review' or state != 'draft'">
+                        <field name="ohmyfin_review_input" groups="ohmyfin_trade_check.group_compliance_reviewer"
+                               placeholder="Why the potential match is not this payee, in a sentence."/>
+                        <button name="action_ohmyfin_release" type="object" string="Release and post" class="btn-primary"
+                                groups="ohmyfin_trade_check.group_compliance_reviewer" colspan="2"/>
+                    </group>
+                    <group invisible="not ohmyfin_review_reason">
+                        <field name="ohmyfin_reviewed_by"/>
+                        <field name="ohmyfin_reviewed_at"/>
+                        <field name="ohmyfin_review_reason"/>
+                    </group>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_partner_form_ohmyfin" model="ir.ui.view">
+        <field name="name">res.partner.form.ohmyfin_trade_check</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Sanctions screening" name="ohmyfin_screening">
+                    <field name="ohmyfin_screen_state" invisible="1"/>
+                    <field name="ohmyfin_review_current" invisible="1"/>
+                    <div class="mb-2">
+                        <button name="action_ohmyfin_screen" type="object" string="Screen" class="btn-secondary"/>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="ohmyfin_badge"/>
+                            <field name="ohmyfin_report_id" invisible="not ohmyfin_report_id"/>
+                            <field name="ohmyfin_screened_at" invisible="not ohmyfin_screened_at"/>
+                        </group>
+                        <group invisible="not ohmyfin_review_current">
+                            <field name="ohmyfin_reviewed_by"/>
+                            <field name="ohmyfin_reviewed_at"/>
+                            <field name="ohmyfin_review_reason"/>
+                        </group>
+                    </group>
+                    <field name="ohmyfin_matches_html" nolabel="1" invisible="ohmyfin_screen_state in ('no_match', 'not_screened')"/>
+                    <group groups="ohmyfin_trade_check.group_compliance_reviewer"
+                           invisible="ohmyfin_screen_state != 'potential_match' or ohmyfin_review_current">
+                        <field name="ohmyfin_review_input" groups="ohmyfin_trade_check.group_compliance_reviewer"
+                               placeholder="Why the potential match is not this contact, in a sentence."/>
+                        <button name="action_ohmyfin_release" type="object" string="Record the reason" class="btn-primary"
+                                groups="ohmyfin_trade_check.group_compliance_reviewer" colspan="2"/>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>
