@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_partner_bank_form_ohmyfin" model="ir.ui.view">
+        <field name="name">res.partner.bank.form.ohmyfin_trade_check</field>
+        <field name="model">res.partner.bank</field>
+        <field name="inherit_id" ref="base.view_partner_bank_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <field name="ohmyfin_bic_status" invisible="1"/>
+                <div class="alert alert-warning mb-2" role="alert" invisible="not ohmyfin_bic_warning">
+                    <field name="ohmyfin_bic_warning" readonly="1"/>
+                </div>
+                <group string="BIC lookup (Ohmyfin)" name="ohmyfin_bic">
+                    <group>
+                        <field name="ohmyfin_bic_status" string="Result"/>
+                        <field name="ohmyfin_bic_bank_name" invisible="ohmyfin_bic_status != 'found'"/>
+                        <field name="ohmyfin_bic_country" invisible="ohmyfin_bic_status != 'found'"/>
+                    </group>
+                    <group>
+                        <button name="action_ohmyfin_lookup_bic" type="object" string="Look up the BIC" class="btn-secondary"/>
+                    </group>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>
