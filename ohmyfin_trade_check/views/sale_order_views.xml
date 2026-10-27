@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_order_form_ohmyfin" model="ir.ui.view">
+        <field name="name">sale.order.form.ohmyfin_trade_check</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <button name="action_ohmyfin_check" type="object" string="Trade check" class="btn-secondary"
+                        invisible="state not in ('draft', 'sent')"/>
+            </xpath>
+            <xpath expr="//sheet" position="before">
+                <field name="ohmyfin_check_state" invisible="1"/>
+                <div class="alert alert-danger mb-0" role="alert" invisible="ohmyfin_check_state != 'refused'">
+                    Trade check: confirm refused. The reasons are under "Trade check".
+                </div>
+                <div class="alert alert-warning mb-0" role="alert" invisible="ohmyfin_check_state != 'review'">
+                    Trade check: waiting for a compliance reviewer's reason before this order can be confirmed.
+                </div>
+            </xpath>
+            <xpath expr="//notebook" position="inside">
+                <page string="Trade check" name="ohmyfin_trade_check">
+                    <field name="ohmyfin_missing_hs_count" invisible="1"/>
+                    <field name="ohmyfin_check_html" nolabel="1" readonly="1"/>
+                    <group groups="ohmyfin_trade_check.group_compliance_reviewer" invisible="ohmyfin_check_state != 'review'">
+                        <field name="ohmyfin_review_input" groups="ohmyfin_trade_check.group_compliance_reviewer"
+                               placeholder="Why this result does not stop the order, in a sentence. It goes to the chatter with the report id."/>
+                        <button name="action_ohmyfin_release" type="object" string="Release and confirm" class="btn-primary"
+                                groups="ohmyfin_trade_check.group_compliance_reviewer" colspan="2"/>
+                    </group>
+                    <div class="mt-2" invisible="not ohmyfin_missing_hs_count">
+                        <button name="action_ohmyfin_products_missing_hs" type="object" class="btn-link p-0"
+                                string="Products on this order without an HS code"/>
+                    </div>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="group_compliance_reviewer" model="res.groups">
+        <field name="name">Ohmyfin: compliance reviewer</field>
+        <field name="comment">Records the written reason that releases a sales order or an outgoing payment waiting on an Ohmyfin check.</field>
+    </record>
+</odoo>
