@@ -14,8 +14,9 @@ class ResConfigSettings(models.TransientModel):
     ohmyfin_base_url = fields.Char('Ohmyfin API address', config_parameter=PARAM_BASE_URL, default=DEFAULT_BASE_URL)
     ohmyfin_consent = fields.Boolean(
         'Send data to Ohmyfin for the checks', config_parameter=PARAM_CONSENT,
-        help='Sent: contact names and countries, the delivery country, and each product HS code and '
-             'country of origin. No prices, quantities or documents.')
+        help='Sent: contact names and countries, the delivery country, each product HS code and '
+             'country of origin, and the service type of a product without an HS code. No prices, '
+             'quantities or documents.')
     # Default ON, so it is stored as "True"/"False" by hand: a Boolean config_parameter deletes
     # itself when unticked and would read back as the default.
     ohmyfin_auto_screen = fields.Boolean(

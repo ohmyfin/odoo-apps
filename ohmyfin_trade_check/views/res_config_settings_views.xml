@@ -14,7 +14,7 @@
                                 <a href="https://app.ohmyfin.ai/profile/api" target="_blank">Get a key</a>
                             </div>
                         </setting>
-                        <setting id="ohmyfin_consent_setting" help="Sent to Ohmyfin: contact names and countries, the delivery country, and each product's HS code and country of origin. No prices, quantities or documents. Nothing is sent until this box is ticked and a key is saved.">
+                        <setting id="ohmyfin_consent_setting" help="Sent to Ohmyfin: contact names and countries, the delivery country, each product's HS code and country of origin, and the service type of a product without an HS code. No prices, quantities or documents. Nothing is sent until this box is ticked and a key is saved.">
                             <field name="ohmyfin_consent"/>
                         </setting>
                         <setting id="ohmyfin_base_url_setting" string="API address" help="Leave as it is unless Ohmyfin support asks you to change it.">

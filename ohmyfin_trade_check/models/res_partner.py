@@ -5,6 +5,10 @@ its name, type or country changes (the "screen contacts automatically" switch, d
 A creation or an edit of one or a few contacts is screened at once; a bulk import is marked
 pending and screened by the hourly job, so an import of thousands of contacts neither waits on
 thousands of calls nor spends the day's allowance in one go.
+
+The screen's state, key, date, matches and a reviewer's release are written by this module only
+(changes/0053, ``ohmyfin_protected``): the payment guard decides from them, so a user who could
+write "no_match" on a listed payee, or a release reference, could pay it.
 """
 import hashlib
 import json
@@ -16,6 +20,7 @@ from odoo.exceptions import UserError
 
 from . import ohmyfin_words as words
 from .ohmyfin_client import OhmyfinClient, OhmyfinUnavailable
+from .ohmyfin_protected import for_create, for_write
 from .ohmyfin_review import REVIEWER_GROUP, take_reason
 
 _logger = logging.getLogger(__name__)
@@ -26,6 +31,21 @@ INLINE_LIMIT = 5
 # A payee screened longer ago than this is screened again before a payment (§4.1 item 4).
 STALE_DAYS = 30
 CRON_BATCH = 20
+# Written by the module only (changes/0053): each field and the value a new contact has.
+PROTECTED = {
+    'ohmyfin_screen_state': 'not_screened',
+    'ohmyfin_screened_at': False,
+    'ohmyfin_lists_count': 0,
+    'ohmyfin_report_id': False,
+    'ohmyfin_screen_reason': False,
+    'ohmyfin_matches_json': False,
+    'ohmyfin_screen_key': False,
+    'ohmyfin_screen_pending': False,
+    'ohmyfin_review_reason': False,
+    'ohmyfin_reviewed_by': False,
+    'ohmyfin_reviewed_at': False,
+    'ohmyfin_released_for': False,
+}
 
 
 class ResPartner(models.Model):
@@ -104,12 +124,13 @@ class ResPartner(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        partners = super().create(vals_list)
+        partners = super().create(for_create(self, vals_list, PROTECTED))
         if not self.env.context.get('ohmyfin_no_screen'):
             partners._ohmyfin_auto_screen()
         return partners
 
     def write(self, vals):
+        vals = for_write(self, vals, PROTECTED)
         res = super().write(vals)
         if not self.env.context.get('ohmyfin_no_screen') and any(f in vals for f in SCREEN_FIELDS):
             self._ohmyfin_auto_screen()
