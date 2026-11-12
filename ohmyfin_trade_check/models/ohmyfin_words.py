@@ -7,6 +7,7 @@ result is a flag to check the item's classification, never a licence determinati
 the other name. Nothing about tracking.
 """
 import json
+import re
 
 from markupsafe import Markup, escape
 
@@ -35,6 +36,49 @@ GOODS_LABELS = {
     'not_goods_screened': 'Not goods-screened: no HS code',
     'invalid_code': 'Not goods-screened: the HS code is not 4 to 10 digits',
     'not_accepted': 'Not goods-screened: the service did not accept this HS code',
+    'no_classification': 'Not goods-screened: no classification is held for this HS code',
+}
+
+# A service line (changes/0051): the same statuses as goods, worded as a service. The line's
+# service type is filled in for 'not_goods_screened' ("service type 'x' is not screened").
+SERVICE_LABELS = {
+    'prohibited': 'Service prohibited for this destination',
+    'licence_may_be_required': "Licence may be required for this service: check what it covers",
+    'no_flag': 'Service screened: no flag',
+    'not_goods_screened': "Not screened: service type '%s' is not screened",
+    'not_accepted': 'Not screened: the service type was not accepted',
+    'no_classification': 'Not screened: no rule is held for this service type',
+}
+
+# The product's service type, offered on the product form when it has no HS code. Keys are the
+# API's values, sent as `service_type` on an order line.
+SERVICE_TYPES = [
+    ('technical_assistance', 'Technical assistance'),
+    ('brokering', 'Brokering'),
+    ('software', 'Software'),
+    ('technology', 'Technology'),
+    ('it_services', 'IT services'),
+    ('engineering', 'Engineering'),
+    ('architecture', 'Architecture'),
+    ('legal_advisory', 'Legal advisory'),
+    ('accounting_auditing_tax', 'Accounting, auditing and tax'),
+    ('management_consulting', 'Management consulting'),
+    ('public_relations', 'Public relations'),
+    ('advertising', 'Advertising'),
+    ('market_research', 'Market research'),
+    ('financial_services', 'Financial services'),
+    ('transport_logistics', 'Transport and logistics'),
+    ('other_service', 'Other service'),
+]
+SERVICE_TYPE_LABELS = dict(SERVICE_TYPES)
+
+# goods.classification: what the control lists hold for the HS code. Information only; the
+# status above is what the order waits on.
+CLASSIFICATION_LABELS = {
+    'controlled': 'The HS code maps to a control-list entry',
+    'possibly_controlled': "Possibly controlled: it depends on the item's technical parameters",
+    'not_listed': 'The HS code maps to no control-list entry',
+    'not_controlled': 'No control-list entry for this HS code',
 }
 
 CHP_LABELS = {
@@ -155,11 +199,17 @@ def order_chatter(decision, result, reason=None, confirmed=None):
     if decision == 'review':
         return ('Trade check%s: waiting for a compliance reviewer. %s' % (ref, ' '.join(result.get('review_reasons') or []))).strip()
     lines = result.get('lines') or []
-    checked = len([line for line in lines if line.get('hs_code')])
-    text = 'Trade check%s: no findings. %s line(s) goods-checked' % (ref, checked)
-    unchecked = len(lines) - checked
+    # By the line's STATE, not by whether it carries a code: since 01/11/2026 a
+    # coded line can still come back not goods-screened, because Ohmyfin holds no
+    # classification for that code. Counting codes called those lines checked.
+    screened = [line for line in lines if line.get('state') != 'not_goods_screened']
+    services = len([line for line in screened if line_kind(line) == 'service'])
+    text = 'Trade check%s: no findings. %s line(s) goods-checked' % (ref, len(screened) - services)
+    if services:
+        text += ', %s service line(s) screened' % services
+    unchecked = len(lines) - len(screened)
     if unchecked:
-        text += ', %s not goods-screened' % unchecked
+        text += ', %s not screened' % unchecked
     text += '.'
     if reasons:
         text += ' ' + ' '.join(reasons)
@@ -184,6 +234,115 @@ def payment_note(state, vendor_name, report_id=None, reason=None, lists=None, po
                 else 'The payment was not posted: "refuse when the check cannot run" is on.')
         return 'Payee not screened: %s. %s' % (reason or 'the check could not run', tail)
     return 'Payee screen: %s.%s' % (PARTY_LABELS.get(state, state), ref)
+
+
+def line_kind(line):
+    """'goods', 'service' or 'none'. The server sends `kind`; an older answer does not, and a
+    line is then a service when it carries a service type or a service classification."""
+    kind = line.get('kind')
+    if kind in ('goods', 'service', 'none'):
+        return kind
+    goods = line.get('goods') if isinstance(line.get('goods'), dict) else {}
+    if line.get('service_type') or goods.get('classification') == 'service_screened':
+        return 'service'
+    return 'goods'
+
+
+def service_type_label(value):
+    return SERVICE_TYPE_LABELS.get(value, (value or '').replace('_', ' '))
+
+
+def line_result_text(line):
+    """The goods or service result of one answer line, as shown in the panel."""
+    goods = line.get('goods') if isinstance(line.get('goods'), dict) else {}
+    status = goods.get('status')
+    if line_kind(line) == 'service':
+        text = SERVICE_LABELS.get(status, status or '')
+        if status == 'not_goods_screened':
+            text = text % service_type_label(line.get('service_type')).lower()
+        elif status in ('not_accepted', 'no_classification') and goods.get('reason'):
+            # The server says why (e.g. it does not screen this service type yet).
+            text = 'Not screened: %s' % goods['reason'].rstrip('.')
+    else:
+        text = GOODS_LABELS.get(status, status or '')
+    if status == 'licence_may_be_required' and goods.get('jurisdictions_requiring_license'):
+        text += ' (%s)' % ', '.join(goods['jurisdictions_requiring_license'])
+    return text
+
+
+def possible_control_lines(goods):
+    """goods.possible_controls as information on the line, never as a hold:
+    "May be controlled if the item is <decides> (<list> <entry>): classify." """
+    out = []
+    for item in (goods or {}).get('possible_controls') or []:
+        if not isinstance(item, dict) or not item.get('decides'):
+            continue
+        where = ' '.join(str(b) for b in (item.get('list'), item.get('entry')) if b)
+        text = 'May be controlled if the item is %s' % item['decides']
+        if where:
+            text += ' (%s)' % where
+        out.append(text + ': classify.')
+    return out
+
+
+def _measure_text(measure):
+    if isinstance(measure, dict):
+        return measure.get('label') or measure.get('name') or measure.get('type') or ''
+    return str(measure) if measure else ''
+
+
+def _itar_text(value):
+    match = re.fullmatch(r'([a-z])(\d*)', str(value)) if isinstance(value, str) else None
+    if match:
+        policy = {'d1': ', policy of denial', 'd2': ', denial with exceptions'}.get(value, '')
+        return 'US: ITAR §126.1(%s)%s%s' % (match.group(1), '(%s)' % match.group(2) if match.group(2) else '', policy)
+    return 'US: ITAR §126.1 country' if value is True else 'US: ITAR §126.1 (%s)' % value
+
+
+def regime_lines(regimes):
+    """The order-level "Destination regimes" block, from destination.regimes. Every key is
+    optional; an absent or empty answer gives no lines, and nothing here raises."""
+    if not isinstance(regimes, dict):
+        return []
+    out = []
+    eu_un = regimes.get('eu_un_regimes')
+    embargoes = []
+    # The server's own summary, {UN|EU|UK|US: scope}; when it names any, it is the whole answer.
+    arms = regimes.get('arms_embargo')
+    arms = {k: v for k, v in arms.items() if v} if isinstance(arms, dict) else {}
+    for by, scope in sorted(arms.items()):
+        if by == 'US' and regimes.get('itar_126_1'):
+            continue  # the ITAR line below is what the US scope is
+        embargoes.append('Arms embargo (%s): %s' % (by, str(scope).replace('_', ' ')))
+    for regime in eu_un if isinstance(eu_un, list) else []:
+        if not isinstance(regime, dict):
+            continue
+        by = regime.get('adopted_by') or 'UN or EU'
+        measures = [m for m in (_measure_text(x) for x in regime.get('measures') or []) if m]
+        if regime.get('arms_embargo') and not arms:
+            embargoes.append('Arms embargo (%s): %s' % (by, str(regime['arms_embargo']).replace('_', ' ')))
+        if measures:
+            out.append('Restrictive measures (%s): %s' % (by, ', '.join(measures)))
+    uk = regimes.get('uk_arms_embargo')
+    if uk and 'UK' not in arms:
+        embargoes.append('Arms embargo (UK)' + (': %s' % str(uk).replace('_', ' ') if isinstance(uk, str) else ''))
+    if embargoes:
+        out = embargoes + out
+    elif isinstance(regimes.get('arms_embargo'), (dict, list)) or (isinstance(eu_un, list) and uk is False):
+        # The server's summary is present and names none (or, older answers, UK said false).
+        out.insert(0, 'Arms embargo: none on record (UN, EU, UK)')
+    groups = regimes.get('ear_country_groups')
+    if isinstance(groups, list) and groups:
+        out.append('EAR country groups: %s' % ', '.join(str(g) for g in groups))
+    if regimes.get('itar_126_1'):
+        out.append(_itar_text(regimes['itar_126_1']))
+    if regimes.get('eu_member') is True:
+        out.append('EU member state (EU single market)')
+    elif regimes.get('eu001') is True:
+        out.append('EU general export authorisation EU001: this destination is listed')
+    elif regimes.get('eu001') is False:
+        out.append('EU general export authorisation EU001: this destination is not listed')
+    return out
 
 
 def order_panel(env, state, result, extra=None):
@@ -239,17 +398,20 @@ def order_panel(env, state, result, extra=None):
         rows.append(('Ships from', result['origin_country']))
     parts.append(Markup('<table class="table table-sm mb-2"><tbody>%s</tbody></table>') % Markup('').join(
         Markup('<tr><td style="font-weight: 600;">%s</td><td>%s</td></tr>') % row for row in rows))
+    regimes = regime_lines(destination.get('regimes'))
+    if regimes:
+        parts.append(Markup('<p class="mb-1" style="font-weight: 600;">Destination regimes</p><ul>%s</ul>') % (
+            Markup('').join(Markup('<li>%s</li>') % r for r in regimes)))
 
     lines = result.get('lines') or []
     names = extra.get('line_names') or {}
     if lines:
         body = []
         for line in lines:
-            goods = line.get('goods') or {}
-            chp = line.get('chp') or {}
-            goods_text = GOODS_LABELS.get(goods.get('status'), goods.get('status') or '')
-            if goods.get('status') == 'licence_may_be_required' and goods.get('jurisdictions_requiring_license'):
-                goods_text += ' (%s)' % ', '.join(goods['jurisdictions_requiring_license'])
+            goods = line.get('goods') if isinstance(line.get('goods'), dict) else {}
+            chp = line.get('chp') if isinstance(line.get('chp'), dict) else {}
+            is_service = line_kind(line) == 'service'
+            goods_text = line_result_text(line)
             override = (extra.get('line_overrides') or {}).get(str(line.get('line')))
             if override:
                 goods_text = GOODS_LABELS.get(override, goods_text)
@@ -262,8 +424,18 @@ def order_panel(env, state, result, extra=None):
             product = Markup('%s') % names.get(str(line.get('line')), '')
             if line.get('country_of_origin'):
                 product += Markup('<br/><span class="text-muted">made in %s</span>') % line['country_of_origin']
+            classification = CLASSIFICATION_LABELS.get(goods.get('classification')) if not is_service else None
+            if classification:
+                goods_text = Markup('%s<br/><span class="text-muted">%s</span>') % (goods_text, classification)
+            code = ('Service: %s' % service_type_label(line.get('service_type'))) if is_service \
+                else (line.get('hs_code') or '')
             body.append(Markup('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>') % (
-                line.get('line'), product, line.get('hs_code') or '', goods_text, chp_text))
+                line.get('line'), product, code, goods_text, chp_text))
+            controls = possible_control_lines(goods)
+            if controls:
+                body.append(Markup('<tr><td></td><td colspan="4"><span style="font-weight: 600;">For information '
+                                   '(line %s)</span><ul class="mb-0">%s</ul></td></tr>') % (
+                    line.get('line'), Markup('').join(Markup('<li>%s</li>') % c for c in controls)))
             actions = chp.get('required_actions') or []
             if actions:
                 body.append(Markup('<tr><td></td><td colspan="4"><span style="font-weight: 600;">Required actions '
@@ -271,11 +443,11 @@ def order_panel(env, state, result, extra=None):
                     line.get('line'), Markup('').join(Markup('<li>%s</li>') % a for a in actions)))
         parts.append(Markup(
             '<table class="table table-sm table-bordered mb-2"><thead><tr><th>Line</th><th>Product</th>'
-            '<th>HS code</th><th>Goods</th><th>CHP</th></tr></thead><tbody>%s</tbody></table>'
+            '<th>HS code or service</th><th>Result</th><th>CHP</th></tr></thead><tbody>%s</tbody></table>'
         ) % Markup('').join(body))
     if extra.get('service_lines'):
         parts.append(Markup('<p class="text-muted mb-1">%s</p>') % (
-            '%s service line(s) not goods-screened: services carry no HS code.' % extra['service_lines']))
+            '%s service line(s) not screened: the product has no service type.' % extra['service_lines']))
     parts.append(Markup('<p class="text-muted mb-0">%s</p>') % GOODS_FOOTNOTE)
     return Markup('').join(parts)
 

@@ -2,6 +2,7 @@
 bills straight after; a payment held in draft there would fail that reconciliation. So the payee
 guard runs here first, before anything is created: when any payee is held, no payment is created,
 the payee's screen is kept, and the wizard answers with the same warning as the payment form.
+No context key skips this (changes/0053).
 """
 from odoo import models
 
@@ -14,7 +15,7 @@ class AccountPaymentRegister(models.TransientModel):
 
     def action_create_payments(self):
         client = OhmyfinClient(self.env)
-        if not client.is_active() or self.env.context.get('ohmyfin_skip_check') or self.payment_type != 'outbound':
+        if not client.is_active() or self.payment_type != 'outbound':
             return super().action_create_payments()
 
         held = []

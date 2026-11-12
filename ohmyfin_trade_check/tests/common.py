@@ -7,6 +7,7 @@ POST /api/v5/trade/check, GET /api/v5/banks): see docs/api-trade-check.md in the
 """
 import json
 import logging
+import re
 
 import requests
 
@@ -48,22 +49,62 @@ def party(name, country, state='no_match', same=False):
             'matches': matches, 'state': state, 'same_as_customer': same}
 
 
+REGIMES = {
+    'eu_un_regimes': [{'id': 23, 'adopted_by': 'UN and EU', 'measures': ['arms embargo', 'asset freeze'],
+                       'arms_embargo': 'countrywide'}],
+    'uk_arms_embargo': True,
+    'itar_126_1': 'd1',
+    'ear_country_groups': ['D:1', 'E:1'],
+    'eu_member': False,
+    'eu001': False,
+    'chp_partner': False,
+}
+
+POSSIBLE_CONTROLS = [
+    {'list': 'EU dual-use', 'entry': '3A002.a', 'decides': 'a digital oscilloscope with a sampling rate above 10 GS/s'},
+    {'list': 'Wassenaar', 'entry': '3A002', 'decides': 'specially designed for military use'},
+]
+
+
 def trade_answer(payload, case='no_findings'):
-    """The /api/v5/trade/check answer for one fixture case, line by line from the request."""
+    """The /api/v5/trade/check answer for one fixture case, line by line from the request.
+    Since changes/0051 a line may carry `service_type` instead of `hs_code`, every answer line
+    carries `kind`, and the destination may carry `regimes` (case 'regimes')."""
     customer = payload['customer']
     ship = payload['ship_to']
     lines = []
     refusals, reviews = [], []
     for n, line in enumerate(payload['lines'], start=1):
         hs = line.get('hs_code')
+        service = line.get('service_type')
+        if service:
+            status = 'not_goods_screened' if service == 'other_service' else 'no_flag'
+            lines.append({'line': n, 'hs_code': None, 'service_type': service, 'kind': 'service',
+                          'country_of_origin': None, 'state': status,
+                          'goods': {'status': status, 'classification': 'service_screened'},
+                          'chp': {'status': 'no_hs_code'}})
+            continue
         if not hs:
-            lines.append({'line': n, 'hs_code': None, 'country_of_origin': line.get('country_of_origin'),
+            lines.append({'line': n, 'hs_code': None, 'service_type': None, 'kind': 'none',
+                          'country_of_origin': line.get('country_of_origin'),
                           'state': 'not_goods_screened', 'goods': {'status': 'not_goods_screened'},
                           'chp': {'status': 'no_hs_code'}})
             continue
-        goods = {'status': 'no_flag', 'risk_level': 'low', 'jurisdictions_requiring_license': []}
+        goods = {'status': 'no_flag', 'risk_level': 'low', 'jurisdictions_requiring_license': [],
+                 'classification': 'not_listed'}
+        if case == 'possible_controls' and n == 1:
+            goods.update(classification='possibly_controlled', possible_controls=POSSIBLE_CONTROLS)
         chp = {'status': 'no_rule', 'list_version': 'Version of February 2024'}
         state = 'no_flag'
+        if not re.fullmatch(r'\d{4,10}', hs):
+            # As the live server answers since changes/0051: a code that is not 4 to 10 digits
+            # is not accepted, and the line holds the order for a reviewer.
+            lines.append({'line': n, 'hs_code': hs, 'service_type': None, 'kind': 'goods',
+                          'country_of_origin': line.get('country_of_origin'), 'state': 'review',
+                          'goods': {'status': 'not_accepted'}, 'chp': {'status': 'not_accepted'}})
+            reviews.append('Line %s (HS %s): the goods could not be screened (not an HS code of 4 to 10 digits); '
+                           'classify the item before it ships.' % (n, hs))
+            continue
         if case == 'prohibited_goods' and n == 1:
             goods['status'], state = 'prohibited', 'refused'
             refusals.append('Line 1 (HS %s): export to %s is prohibited under at least one jurisdiction.' % (hs, ship['country']))
@@ -78,8 +119,8 @@ def trade_answer(payload, case='no_findings'):
                                         'Art. 12g Reg. (EU) No 833/2014: include a no-re-export-to-Russia clause']}
             state = 'review'
             reviews.append('Line 1 (HS %s): an EU common high priority (CHP) item to %s.' % (hs, ship['country']))
-        lines.append({'line': n, 'hs_code': hs, 'country_of_origin': line.get('country_of_origin'), 'state': state,
-                      'goods': goods, 'chp': chp})
+        lines.append({'line': n, 'hs_code': hs, 'service_type': None, 'kind': 'goods',
+                      'country_of_origin': line.get('country_of_origin'), 'state': state, 'goods': goods, 'chp': chp})
 
     cust_state = 'listed' if case == 'listed' else ('potential_match' if case == 'potential' else 'no_match')
     if case == 'listed':
@@ -91,6 +132,10 @@ def trade_answer(payload, case='no_findings'):
         refusals.append('The destination, %s, is under a comprehensive embargo (US, EU).' % ship['country'])
     decision = 'refused' if refusals else ('review_required' if reviews else 'no_findings')
     same = ship['name'] == customer['name'] and ship['country'] == customer['country']
+    destination = {'country': ship['country'], 'iso_code_valid': True, 'data_on_file': True,
+                   'comprehensive_embargo': embargo, 'embargoed_by': ['US', 'EU'] if embargo else []}
+    if case == 'regimes':
+        destination['regimes'] = REGIMES
     return {
         'check_id': 'TC-01JTESTCHECK0000000000000%s' % len(payload['lines']),
         'checked_at': '2026-10-23T08:00:00+00:00',
@@ -102,8 +147,7 @@ def trade_answer(payload, case='no_findings'):
         'customer': party(customer['name'], customer['country'], cust_state),
         'ship_to': party(ship['name'], ship['country'], 'no_match', same),
         'origin_country': payload.get('origin_country'),
-        'destination': {'country': ship['country'], 'data_on_file': True, 'comprehensive_embargo': embargo,
-                        'embargoed_by': ['US', 'EU'] if embargo else []},
+        'destination': destination,
         'country_controls': [],
         'goods_jurisdiction': 'ALL',
         'lines': lines,
@@ -142,6 +186,10 @@ class OhmyfinCase(AccountTestInvoicingCommon):
         cls.laptop = cls._product('DEMO Laptop', '847130', 'base.cn')
         cls.uncoded = cls._product('DEMO Cable', '', 'base.de')
         cls.service = cls.env['product.product'].create({'name': 'DEMO Installation', 'type': 'service'})
+        cls.engineering = cls.env['product.product'].create({'name': 'DEMO Engineering consulting', 'type': 'service',
+                                                             'ohmyfin_service_type': 'engineering'})
+        cls.other_service = cls.env['product.product'].create({'name': 'DEMO Misc service', 'type': 'service',
+                                                               'ohmyfin_service_type': 'other_service'})
 
         cls.reviewer = new_test_user(
             cls.env, login='ohmyfin_reviewer',
@@ -151,6 +199,18 @@ class OhmyfinCase(AccountTestInvoicingCommon):
         cls.salesman = new_test_user(
             cls.env, login='ohmyfin_salesman',
             groups='base.group_user,sales_team.group_sale_manager,account.group_account_manager',
+            company_id=cls.env.company.id, company_ids=[Command.set(cls.env.company.ids)])
+        # changes/0053: the users a hold must hold. The plainest rights that confirm an order or
+        # post a payment, no reviewer group, plus "Contact Creation" (base.group_partner_manager),
+        # which Odoo gives every new internal user by default and without which Odoo itself, not
+        # this module, refuses their write on a contact.
+        cls.plain_salesman = new_test_user(
+            cls.env, login='ohmyfin_plain_salesman',
+            groups='base.group_user,base.group_partner_manager,sales_team.group_sale_salesman',
+            company_id=cls.env.company.id, company_ids=[Command.set(cls.env.company.ids)])
+        cls.plain_accountant = new_test_user(
+            cls.env, login='ohmyfin_plain_billing',
+            groups='base.group_user,base.group_partner_manager,account.group_account_invoice',
             company_id=cls.env.company.id, company_ids=[Command.set(cls.env.company.ids)])
 
     @classmethod
@@ -192,7 +252,7 @@ class OhmyfinCase(AccountTestInvoicingCommon):
 
     # ── helpers ───────────────────────────────────────────────────────────────────────────
 
-    def make_order(self, products=None, customer=None, ship_to=None):
+    def order_vals(self, products=None, customer=None, ship_to=None):
         customer = customer or self.customer
         products = products if products is not None else [self.ic, self.laptop, self.uncoded]
         vals = {
@@ -201,7 +261,12 @@ class OhmyfinCase(AccountTestInvoicingCommon):
         }
         if ship_to:
             vals['partner_shipping_id'] = ship_to.id
-        return self.env['sale.order'].create(vals)
+        return vals
+
+    def make_order(self, products=None, customer=None, ship_to=None, user=None):
+        """An order, created by ``user`` when given (it is then that user's record)."""
+        orders = self.env['sale.order'] if user is None else self.env['sale.order'].with_user(user)
+        return orders.create(self.order_vals(products, customer, ship_to))
 
     def messages(self, record):
         return record.message_ids.mapped('body')
@@ -209,8 +274,20 @@ class OhmyfinCase(AccountTestInvoicingCommon):
     def last_message(self, record):
         return record.message_ids.sorted('id')[-1:].body or ''
 
-    def make_payment(self, partner, amount=100.0):
-        return self.env['account.payment'].create({
+    def module_messages(self, record, phrase):
+        """The chatter lines of ``record`` whose text carries ``phrase``."""
+        return record.sudo().message_ids.filtered(lambda m: phrase in (m.body or ''))
+
+    def assert_module_owned(self, model, protected):
+        """changes/0053: every stored field this module adds to ``model``, apart from the
+        reviewer's input box (reviewer group only), is written by the module only."""
+        stored = {name for name, field in self.env[model]._fields.items()
+                  if name.startswith('ohmyfin_') and field.store and not field.related}
+        self.assertEqual(stored - {'ohmyfin_review_input'}, set(protected))
+
+    def make_payment(self, partner, amount=100.0, user=None):
+        payments = self.env['account.payment'] if user is None else self.env['account.payment'].with_user(user)
+        return payments.create({
             'payment_type': 'outbound',
             'partner_type': 'supplier',
             'partner_id': partner.id,
