@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- The service type (changes/0051), on the General Information tab: the HS code sits under
+         Logistics, which Odoo hides for a service, so the type cannot live next to it. Shown only
+         while the product has no HS code; a coded product is goods and is sent by its code. -->
+    <record id="product_template_form_view_ohmyfin" model="ir.ui.view">
+        <field name="name">product.template.form.ohmyfin_trade_check</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='group_general']" position="inside">
+                <field name="ohmyfin_has_hs_code" invisible="1"/>
+                <field name="ohmyfin_service_type" invisible="ohmyfin_has_hs_code"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

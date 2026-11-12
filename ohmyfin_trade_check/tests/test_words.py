@@ -71,7 +71,8 @@ class TestWords(OhmyfinCase):
                     texts.extend(t for t in (el.text, el.tail) if t and t.strip())
                     texts.extend(el.get(a) for a in ('string', 'help', 'placeholder', 'title', 'data-string') if el.get(a))
         self.assertTrue(any('Trade check' in t for t in texts))
-        for model in ('res.partner', 'sale.order', 'account.payment', 'res.partner.bank', 'res.config.settings'):
+        for model in ('res.partner', 'sale.order', 'account.payment', 'res.partner.bank', 'res.config.settings',
+                      'product.template'):
             for name, field in self.env[model]._fields.items():
                 if not name.startswith('ohmyfin_'):
                     continue
@@ -94,8 +95,10 @@ class TestWords(OhmyfinCase):
         rendered = []
         now = datetime(2026, 10, 23, 8, 0)
         payload = {'customer': {'name': 'DEMO A', 'country': 'KZ'}, 'ship_to': {'name': 'DEMO A', 'country': 'KZ'},
-                   'origin_country': 'DE', 'lines': [{'hs_code': '854231'}, {'hs_code': '847130'}, {}]}
-        for case in ('no_findings', 'listed', 'potential', 'embargoed', 'prohibited_goods', 'licence', 'chp_r2'):
+                   'origin_country': 'DE', 'lines': [{'hs_code': '854231'}, {'hs_code': '847130'}, {},
+                                                     {'service_type': 'engineering'}, {'service_type': 'other_service'}]}
+        for case in ('no_findings', 'listed', 'potential', 'embargoed', 'prohibited_goods', 'licence', 'chp_r2',
+                     'possible_controls', 'regimes'):
             result = trade_answer(payload, case)
             for state in ('none', 'no_findings', 'review', 'released', 'refused', 'not_screened'):
                 rendered.append(str(words.order_panel(self.env, state, result, {
@@ -106,6 +109,12 @@ class TestWords(OhmyfinCase):
         for chp in words.CHP_LABELS.values():
             rendered.append(chp)
         rendered.extend(words.GOODS_LABELS.values())
+        rendered.extend(words.SERVICE_LABELS.values())
+        rendered.extend(words.CLASSIFICATION_LABELS.values())
+        rendered.extend(label for _key, label in words.SERVICE_TYPES)
+        for status in words.SERVICE_LABELS:
+            rendered.append(words.line_result_text({'kind': 'service', 'service_type': 'other_service',
+                                                    'goods': {'status': status, 'classification': 'service_screened'}}))
         rendered.extend([
             words.order_chatter('not_screened', {}, 'the service did not answer in time', confirmed=True),
             words.order_chatter('not_screened', {}, 'the service did not answer in time', confirmed=False),
@@ -122,3 +131,120 @@ class TestWords(OhmyfinCase):
         self.assertEqual(bad, [])
         self.assertTrue(any('No match on 312 lists, ' in r for r in rendered))
         self.assertTrue(any(words.GOODS_FOOTNOTE in r.replace('&#39;', "'") for r in rendered))
+
+    # ── changes/0051 ──────────────────────────────────────────────────────────────────────
+
+    def test_service_line_is_worded_as_a_service(self):
+        line = {'line': 2, 'service_type': 'engineering', 'kind': 'service', 'state': 'no_flag',
+                'goods': {'status': 'no_flag', 'classification': 'service_screened'}}
+        self.assertEqual(words.line_result_text(line), 'Service screened: no flag')
+        line['goods'] = {'status': 'prohibited', 'classification': 'service_screened'}
+        self.assertEqual(words.line_result_text(line), 'Service prohibited for this destination')
+        line['goods'] = {'status': 'licence_may_be_required', 'jurisdictions_requiring_license': ['EU']}
+        self.assertIn('for this service', words.line_result_text(line))
+        line['goods'] = {'status': 'no_classification'}
+        self.assertNotIn('HS code', words.line_result_text(line))
+        other = {'kind': 'service', 'service_type': 'other_service', 'goods': {'status': 'not_goods_screened'}}
+        self.assertEqual(words.line_result_text(other), "Not screened: service type 'other service' is not screened")
+        # An answer without `kind` is read from the service type or the classification.
+        self.assertEqual(words.line_kind({'service_type': 'software'}), 'service')
+        self.assertEqual(words.line_kind({'goods': {'classification': 'service_screened'}}), 'service')
+        self.assertEqual(words.line_kind({'hs_code': '854231'}), 'goods')
+        self.assertEqual(words.line_kind({'kind': 'none'}), 'none')
+        goods = {'goods': {'status': 'no_flag'}, 'kind': 'goods'}
+        self.assertEqual(words.line_result_text(goods), 'No flag on the export-control lists')
+
+    def test_possible_controls_wording(self):
+        lines = words.possible_control_lines({'possible_controls': [
+            {'list': 'EU dual-use', 'entry': '5A002', 'decides': 'designed for cryptography'},
+            {'list': 'EU dual-use', 'entry': None, 'decides': 'rated for space use'},
+            {'entry': '5A002'},          # nothing to say without `decides`
+            'garbage',
+        ]})
+        self.assertEqual(lines, [
+            'May be controlled if the item is designed for cryptography (EU dual-use 5A002): classify.',
+            'May be controlled if the item is rated for space use (EU dual-use): classify.',
+        ])
+        self.assertEqual(words.possible_control_lines({}), [])
+        self.assertEqual(words.possible_control_lines(None), [])
+        self.assertEqual(hits(' '.join(lines)), [])
+
+    def test_regimes_wording_and_missing_keys(self):
+        from .common import REGIMES
+        lines = words.regime_lines(REGIMES)
+        self.assertEqual(lines, [
+            'Arms embargo (UN and EU): countrywide',
+            'Arms embargo (UK)',
+            'Restrictive measures (UN and EU): arms embargo, asset freeze',
+            'EAR country groups: D:1, E:1',
+            'US: ITAR §126.1(d)(1), policy of denial',
+            'EU general export authorisation EU001: this destination is not listed',
+        ])
+        self.assertEqual(hits(' '.join(lines)), [])
+        # Every key is optional, and nothing odd raises.
+        for regimes in (None, {}, 'garbage', [], {'eu_un_regimes': None, 'itar_126_1': None, 'eu001': None},
+                        {'eu_un_regimes': ['x', {}], 'ear_country_groups': 'D:1'}):
+            self.assertEqual(words.regime_lines(regimes), [], regimes)
+        self.assertEqual(words.regime_lines({'eu_un_regimes': [], 'uk_arms_embargo': False}),
+                         ['Arms embargo: none on record (UN, EU, UK)'])
+        self.assertEqual(words.regime_lines({'eu001': True, 'itar_126_1': True}),
+                         ['US: ITAR §126.1 country', 'EU general export authorisation EU001: this destination is listed'])
+        self.assertEqual(words.regime_lines({'eu_un_regimes': [{'adopted_by': 'EU', 'arms_embargo': 'partial',
+                                                                 'measures': [{'name': 'travel ban'}]}]}),
+                         ['Arms embargo (EU): partial', 'Restrictive measures (EU): travel ban'])
+        # The panel shows the block only when the answer carries one, and survives a bare destination.
+        panel = str(words.order_panel(self.env, 'no_findings', {'destination': {'regimes': REGIMES}, 'lines': []}))
+        self.assertIn('Destination regimes', panel)
+        panel = str(words.order_panel(self.env, 'no_findings', {'destination': {'country': 'KZ'}, 'lines': []}))
+        self.assertNotIn('Destination regimes', panel)
+
+    def test_regimes_arms_embargo_summary_is_the_whole_answer(self):
+        # The server's summary {UN|EU|UK|US: scope} names the embargoes; the per-regime and the
+        # uk_arms_embargo lines that say the same are not repeated.
+        regimes = dict(REGIMES_SUMMARY)
+        lines = words.regime_lines(regimes)
+        embargo_lines = [line for line in lines if line.startswith('Arms embargo')]
+        self.assertEqual(embargo_lines, ['Arms embargo (EU): countrywide', 'Arms embargo (UK): countrywide'])
+        self.assertEqual(len(lines), len(set(lines)), 'no duplicate line')
+        self.assertNotIn('Arms embargo (UN and EU): countrywide', lines)
+        self.assertNotIn('Arms embargo (UK)', lines)
+        panel = str(words.order_panel(self.env, 'review', {'destination': {'regimes': regimes}, 'lines': []}))
+        self.assertEqual(panel.count('Arms embargo (EU): countrywide'), 1)
+        self.assertEqual(panel.count('Arms embargo (UK): countrywide'), 1)
+        # An empty summary (as the live server sends it for AE) names nothing.
+        self.assertEqual(words.regime_lines({'arms_embargo': [], 'eu_un_regimes': [], 'uk_arms_embargo': False})[0],
+                         'Arms embargo: none on record (UN, EU, UK)')
+        self.assertEqual(words.regime_lines({'arms_embargo': {}, 'eu_un_regimes': [], 'uk_arms_embargo': False})[0],
+                         'Arms embargo: none on record (UN, EU, UK)')
+        # As the live server sends SG and FR: uk_arms_embargo null, empty summary: still "none".
+        self.assertEqual(words.regime_lines({'arms_embargo': [], 'eu_un_regimes': [], 'uk_arms_embargo': None})[0],
+                         'Arms embargo: none on record (UN, EU, UK)')
+        # An EU member state says so, and no EU001 line (EU001 is about exports out of the EU).
+        fr = words.regime_lines({'arms_embargo': [], 'eu_member': True, 'eu001': False, 'ear_country_groups': ['A:1']})
+        self.assertIn('EU member state (EU single market)', fr)
+        self.assertFalse([line for line in fr if 'EU001' in line])
+
+    def test_service_not_screened_shows_the_server_reason(self):
+        line = {'line': 3, 'service_type': 'engineering', 'kind': 'service', 'state': 'not_goods_screened',
+                'goods': {'status': 'not_accepted',
+                          'reason': 'The export-control service does not screen this service type yet (HTTP 422).'}}
+        text = words.line_result_text(line)
+        self.assertEqual(text, 'Not screened: The export-control service does not screen this service type yet (HTTP 422)')
+        line['goods']['status'] = 'no_classification'
+        self.assertTrue(words.line_result_text(line).startswith('Not screened: The export-control service'))
+        # Without a reason, the module's own words.
+        del line['goods']['reason']
+        self.assertEqual(words.line_result_text(line), 'Not screened: no rule is held for this service type')
+        panel = str(words.order_panel(self.env, 'review', {'lines': [dict(line, goods={
+            'status': 'not_accepted', 'reason': 'The export-control service does not screen this service type yet (HTTP 422).'})]},
+            {'line_names': {'3': 'DEMO Engineering consulting'}}))
+        self.assertIn('Not screened: The export-control service does not screen this service type yet (HTTP 422)', panel)
+        self.assertEqual(hits(panel), [])
+
+
+REGIMES_SUMMARY = {
+    'arms_embargo': {'EU': 'countrywide', 'UK': 'countrywide', 'UN': None},
+    'eu_un_regimes': [{'id': 23, 'adopted_by': 'UN and EU', 'measures': ['asset freeze'], 'arms_embargo': 'countrywide'}],
+    'uk_arms_embargo': True,
+    'ear_country_groups': ['D:1'],
+}

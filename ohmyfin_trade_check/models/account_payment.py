@@ -6,13 +6,27 @@ chatter, unless "refuse when the check cannot run" is on.
 
 As on the order, a held payment is left in draft and a warning is returned rather than raised,
 so the payee's fresh screen and the chatter line are kept.
+
+The guard's state and the reviewer's record are written by this module only (changes/0053,
+``ohmyfin_protected``), and no context key skips the guard. The payee's screen, which decides it,
+is protected the same way on the contact.
 """
-from odoo import _, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
 from . import ohmyfin_words as words
 from .ohmyfin_client import OhmyfinClient
+from .ohmyfin_protected import for_create, for_write
 from .ohmyfin_review import REVIEWER_GROUP, take_reason
+
+# Written by the module only (changes/0053): each field and the value a new payment has.
+PROTECTED = {
+    'ohmyfin_guard_state': 'none',
+    'ohmyfin_guard_reason': False,
+    'ohmyfin_review_reason': False,
+    'ohmyfin_reviewed_by': False,
+    'ohmyfin_reviewed_at': False,
+}
 
 
 class AccountPayment(models.Model):
@@ -33,12 +47,21 @@ class AccountPayment(models.Model):
     ohmyfin_reviewed_at = fields.Datetime('Reviewed on', readonly=True, copy=False)
     ohmyfin_payee_badge = fields.Char('Payee sanctions status', related='partner_id.commercial_partner_id.ohmyfin_badge')
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        return super().create(for_create(self, vals_list, PROTECTED))
+
+    def write(self, vals):
+        return super().write(for_write(self, vals, PROTECTED))
+
     def _ohmyfin_payee(self):
         self.ensure_one()
         return self.partner_id.commercial_partner_id
 
     def _ohmyfin_guard(self, client):
-        """Decide one payment. True when it may be posted. Screens the payee first if stale."""
+        """Decide one payment. True when it may be posted. Screens the payee first if stale. The
+        guard's own fields are written through sudo() (changes/0053); the chatter line is posted
+        as the user who posts the payment."""
         self.ensure_one()
         payee = self._ohmyfin_payee()
         if self.payment_type != 'outbound' or not payee:
@@ -51,35 +74,37 @@ class AccountPayment(models.Model):
                  words.load(payee.ohmyfin_matches_json).get('matches') or [] if isinstance(m, dict)]
 
         if state == 'listed':
-            self.write({'ohmyfin_guard_state': 'refused', 'ohmyfin_guard_reason': False})
+            self.sudo().write({'ohmyfin_guard_state': 'refused', 'ohmyfin_guard_reason': False})
             self.message_post(body=words.payment_note('listed', payee.name, payee.ohmyfin_report_id,
                                                       lists=[x for x in lists if x][:3]))
             return False
         if state == 'potential_match':
             if payee._ohmyfin_released():
                 # Released on the contact, for this screen: the reason travels with the payment.
-                self.write({'ohmyfin_guard_state': 'released', 'ohmyfin_guard_reason': False,
-                            'ohmyfin_review_reason': payee.ohmyfin_review_reason,
-                            'ohmyfin_reviewed_by': payee.ohmyfin_reviewed_by.id,
-                            'ohmyfin_reviewed_at': payee.ohmyfin_reviewed_at})
+                self.sudo().write({'ohmyfin_guard_state': 'released', 'ohmyfin_guard_reason': False,
+                                   'ohmyfin_review_reason': payee.ohmyfin_review_reason,
+                                   'ohmyfin_reviewed_by': payee.ohmyfin_reviewed_by.id,
+                                   'ohmyfin_reviewed_at': payee.ohmyfin_reviewed_at})
                 self.message_post(body=words.release_note(payee.ohmyfin_reviewed_by.name, payee.ohmyfin_review_reason,
                                                           payee.ohmyfin_report_id))
                 return True
-            self.write({'ohmyfin_guard_state': 'review', 'ohmyfin_guard_reason': False})
+            self.sudo().write({'ohmyfin_guard_state': 'review', 'ohmyfin_guard_reason': False})
             self.message_post(body=words.payment_note('potential_match', payee.name, payee.ohmyfin_report_id))
             return False
         if state == 'not_screened':
             go = not client.refuse_when_unavailable
-            self.write({'ohmyfin_guard_state': 'not_screened', 'ohmyfin_guard_reason': payee.ohmyfin_screen_reason})
+            self.sudo().write({'ohmyfin_guard_state': 'not_screened',
+                               'ohmyfin_guard_reason': payee.ohmyfin_screen_reason})
             self.message_post(body=words.payment_note('not_screened', payee.name, reason=payee.ohmyfin_screen_reason,
                                                       posted=go))
             return go
-        self.write({'ohmyfin_guard_state': 'no_match', 'ohmyfin_guard_reason': False})
+        self.sudo().write({'ohmyfin_guard_state': 'no_match', 'ohmyfin_guard_reason': False})
         return True
 
     def action_post(self):
         client = OhmyfinClient(self.env)
-        if not client.is_active() or self.env.context.get('ohmyfin_skip_check'):
+        # Only "not set up" skips the guard: no context key does (changes/0053).
+        if not client.is_active():
             return super().action_post()
         go = self.browse()
         held = self.browse()

@@ -1,9 +1,14 @@
 """Contact screening (§4.1 item 2): a screen per created company or person, stored state, badge,
 top matches, report id and chatter note; re-screen only when name, type or country changes; bulk
-imports screened by the job; a reviewer's reason on a potential match."""
-from odoo.exceptions import AccessError
-from odoo.tests import tagged
+imports screened by the job; a reviewer's reason on a potential match.
 
+changes/0053 (1.1.1): the screen and a reviewer's release are written by the module only; a plain
+user's create() or write() of them is left out, and the module's own screen still stores."""
+from odoo import fields
+from odoo.exceptions import AccessError
+from odoo.tests import new_test_user, tagged
+
+from ..models.res_partner import PROTECTED
 from .common import LISTED, POTENTIAL, OhmyfinCase
 
 
@@ -112,3 +117,71 @@ class TestContactScreen(OhmyfinCase):
         self.assertIn('reviewed by', partner.ohmyfin_badge)
         with self.assertRaises(AccessError):
             partner.with_user(self.salesman).action_ohmyfin_release()
+
+    # ── changes/0053: the screen is written by the module only ─────────────────────────────
+
+    def test_every_stored_screen_field_is_module_owned(self):
+        self.assert_module_owned('res.partner', PROTECTED)
+
+    def test_plain_user_creates_a_listed_contact_as_not_screened(self):
+        """A contact created with a screen in its values (and the screen at create turned off by
+        context) is created not screened, and the payment guard screens it."""
+        contacts = self.env['res.partner'].with_user(self.plain_accountant).with_context(
+            ohmyfin_no_screen=True, default_ohmyfin_released_for='SCR-00004242@x')
+        partner = contacts.create({
+            'name': LISTED, 'is_company': True, 'country_id': self.kz.id,
+            'ohmyfin_screen_state': 'no_match', 'ohmyfin_screened_at': fields.Datetime.now(),
+            'ohmyfin_screen_key': 'k', 'ohmyfin_lists_count': 312, 'ohmyfin_report_id': 'SCR-1'})
+        self.assertEqual(self.calls, [])
+        self.assertEqual(partner.ohmyfin_screen_state, 'not_screened')
+        self.assertFalse(partner.ohmyfin_screened_at)
+        self.assertFalse(partner.ohmyfin_screen_key)
+        self.assertFalse(partner.ohmyfin_released_for)
+        self.assertEqual(partner.ohmyfin_lists_count, 0)
+        payment = self.make_payment(partner, user=self.plain_accountant)
+        payment.action_post()
+        self.assertEqual(payment.state, 'draft')
+        self.assertEqual(partner.ohmyfin_screen_state, 'listed')
+
+    def test_plain_user_create_is_screened_by_the_module(self):
+        """The module's own screen of a contact a plain user creates still stores (through
+        sudo()), and its chatter line names that user."""
+        partner = self.env['res.partner'].with_user(self.plain_salesman).create(
+            {'name': POTENTIAL, 'is_company': True, 'vat': 'KZ000000000027', 'country_id': self.kz.id})
+        self.assertEqual(partner.ohmyfin_screen_state, 'potential_match')
+        self.assertEqual(partner.ohmyfin_report_id, 'SCR-00004242')
+        self.assertTrue(partner.ohmyfin_screen_key)
+        line = self.module_messages(partner, 'Sanctions screen:')
+        self.assertEqual(len(line), 1)
+        self.assertEqual(line.author_id, self.plain_salesman.partner_id)
+
+    def test_plain_user_cannot_release_a_potential_match_by_writing_it(self):
+        partner = self._create(POTENTIAL)
+        partner.with_user(self.plain_salesman).write({
+            'ohmyfin_released_for': partner._ohmyfin_screen_ref(), 'ohmyfin_reviewed_by': self.plain_salesman.id,
+            'ohmyfin_review_reason': 'Reviewed by me, not a reviewer.', 'ohmyfin_screen_pending': True,
+            'comment': 'an ordinary field still saves'})
+        self.assertFalse(partner.ohmyfin_review_current)
+        self.assertFalse(partner.ohmyfin_released_for)
+        self.assertFalse(partner.ohmyfin_reviewed_by)
+        self.assertFalse(partner.ohmyfin_screen_pending)
+        self.assertIn('an ordinary field still saves', str(partner.comment))
+        self.assertTrue(partner.ohmyfin_badge.startswith('Potential match, '))
+        self.assertNotIn('reviewed by', partner.ohmyfin_badge)
+
+    def test_ordinary_creates_log_no_warning(self):
+        """A new user hands its partner the default screen state through _inherits; that, and a
+        contact created the ordinary way, are not reported as left-out values."""
+        with self.assertNoLogs('odoo.addons.ohmyfin_trade_check.models.ohmyfin_protected', level='WARNING'):
+            new_test_user(self.env, login='ohmyfin_new_colleague', groups='base.group_user')
+            self.env['res.partner'].with_user(self.plain_salesman).create({'name': 'DEMO Ordinary Contact'})
+        with self.assertLogs('odoo.addons.ohmyfin_trade_check.models.ohmyfin_protected', level='WARNING'):
+            self.env['res.partner'].with_user(self.plain_salesman).create(
+                {'name': 'DEMO Claimed Contact', 'ohmyfin_screen_state': 'no_match'})
+
+    def test_module_writes_from_the_superuser_still_store(self):
+        """sudo() is the module's way in; nothing else changed for it."""
+        partner = self._create('DEMO Sudo Customer')
+        partner.sudo().write({'ohmyfin_screen_state': 'potential_match', 'ohmyfin_released_for': 'x@y'})
+        self.assertEqual(partner.ohmyfin_screen_state, 'potential_match')
+        self.assertEqual(partner.ohmyfin_released_for, 'x@y')

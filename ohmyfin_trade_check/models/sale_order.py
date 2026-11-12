@@ -1,7 +1,8 @@
 """The order check (PRD 0022 §4.1 item 3): one POST /api/v5/trade/check when a quotation is
 confirmed, with the customer, the delivery address's name and country, the ship-from country
 (the order's warehouse address, else the company's) and every goods line's HS code and country of
-origin.
+origin. A line whose product has no HS code but a service type (changes/0051) is sent with that
+``service_type`` instead, never with both.
 
 - Listed party, embargoed destination or prohibited goods: confirm is refused.
 - Potential match, licence possibly required, or a CHP item to a diversion-risk country: confirm
@@ -15,6 +16,11 @@ it. The result, the report id and the chatter line are what the reviewer and an 
 
 A reviewer's release holds for exactly what was checked: change the customer, the address or a
 line and the next confirm checks again.
+
+The check's state, result, fingerprint and the reviewer's record are written by this module only
+(changes/0053, ``ohmyfin_protected``): a user's ``create()`` or ``write()`` cannot set them, the
+module writes them through ``sudo()`` and only after ``take_reason()`` for a release, and no
+context key skips the check.
 """
 import hashlib
 import json
@@ -25,9 +31,23 @@ from odoo.exceptions import UserError
 
 from . import ohmyfin_words as words
 from .ohmyfin_client import OhmyfinClient, OhmyfinUnavailable
+from .ohmyfin_protected import for_create, for_write
 from .ohmyfin_review import REVIEWER_GROUP, take_reason
 
 HS_DIGITS = re.compile(r'^\d{4,10}$')
+
+# Written by the module only (changes/0053): each field and the value a new order has.
+PROTECTED = {
+    'ohmyfin_check_state': 'none',
+    'ohmyfin_check_json': False,
+    'ohmyfin_check_id': False,
+    'ohmyfin_checked_at': False,
+    'ohmyfin_check_reason': False,
+    'ohmyfin_check_fingerprint': False,
+    'ohmyfin_review_reason': False,
+    'ohmyfin_reviewed_by': False,
+    'ohmyfin_reviewed_at': False,
+}
 
 
 def normalise_hs(value):
@@ -73,6 +93,13 @@ class SaleOrder(models.Model):
             order.ohmyfin_check_html = words.order_panel(self.env, order.ohmyfin_check_state, result, extra)
             order.ohmyfin_missing_hs_count = len(extra['missing_products'])
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        return super().create(for_create(self, vals_list, PROTECTED))
+
+    def write(self, vals):
+        return super().write(for_write(self, vals, PROTECTED))
+
     # ── what is sent ──────────────────────────────────────────────────────────────────────
 
     def _ohmyfin_goods_fields(self):
@@ -96,41 +123,62 @@ class SaleOrder(models.Model):
         return name, country
 
     def _ohmyfin_payload(self):
-        """(payload, order lines in payload order, panel extras). Goods lines only: sections,
-        notes, down payments and services carry no HS code and are not goods."""
+        """(payload, order lines in payload order, panel extras). Sections, notes, down payments
+        and delivery lines are never sent. A goods product goes by its HS code as before; a
+        product with no HS code and a service type goes by that service type (never both); a
+        service product with no service type is not sent and is counted in ``service_lines``."""
         self.ensure_one()
         has_hs, has_origin = self._ohmyfin_goods_fields()
+        has_service_type = 'ohmyfin_service_type' in self.env['product.product']._fields
         customer = self.partner_id.commercial_partner_id
         ship_name, ship_country = self._ohmyfin_ship_to()
 
-        goods_lines = self.env['sale.order.line']
+        def service_type(product):
+            return (product.ohmyfin_service_type or False) if has_service_type else False
+
+        def hs_of(product):
+            return normalise_hs(product.hs_code if has_hs else '')
+
+        sent_lines = self.env['sale.order.line']
         services = 0
         for line in self.order_line:
             if line.display_type or not line.product_id or getattr(line, 'is_downpayment', False):
                 continue
             if getattr(line, 'is_delivery', False):
                 continue
-            if line.product_id.type != 'consu':
-                services += 1
+            product = line.product_id
+            if product.type != 'consu':
+                # A service is sent only by its service type, and only when it has no HS code.
+                if product.type == 'service' and service_type(product) and not hs_of(product):
+                    sent_lines |= line
+                else:
+                    services += 1
                 continue
-            goods_lines |= line
+            sent_lines |= line
 
         lines = []
         names = {}
         overrides = {}
         missing = self.env['product.product']
-        for n, line in enumerate(goods_lines, start=1):
+        for n, line in enumerate(sent_lines, start=1):
             product = line.product_id
             names[str(n)] = product.display_name
             entry = {}
-            raw = product.hs_code if has_hs else ''
-            hs = normalise_hs(raw)
+            hs = hs_of(product)
             if hs and HS_DIGITS.match(hs):
                 entry['hs_code'] = hs
+            elif hs:
+                # A malformed code is still a code: it is sent (the server takes up to 20
+                # characters), answered "not accepted" and holds the order for a reviewer. It is
+                # never read as a service, even when the product carries a service type.
+                entry['hs_code'] = hs[:20]
+                overrides[str(n)] = 'invalid_code'
+            elif service_type(product):
+                # No HS code at all and a service type: screened as that service, never both.
+                lines.append({'service_type': service_type(product)})
+                continue
             else:
                 missing |= product
-                if hs:
-                    overrides[str(n)] = 'invalid_code'
             if has_origin and product.country_of_origin:
                 entry['country_of_origin'] = product.country_of_origin.code
             lines.append(entry)
@@ -145,7 +193,7 @@ class SaleOrder(models.Model):
             payload['origin_country'] = origin
         extra = {'line_names': names, 'line_overrides': overrides, 'service_lines': services,
                  'missing_products': missing.ids}
-        return payload, goods_lines, extra
+        return payload, sent_lines, extra
 
     @staticmethod
     def _ohmyfin_fingerprint(payload):
@@ -155,7 +203,9 @@ class SaleOrder(models.Model):
 
     def action_confirm(self):
         client = OhmyfinClient(self.env)
-        if not client.is_active() or self.env.context.get('ohmyfin_skip_check'):
+        # Only "not set up" skips the check: no context key does, since JSON-RPC callers send
+        # their own context (changes/0053).
+        if not client.is_active():
             return super().action_confirm()
 
         go = self.browse()
@@ -203,7 +253,7 @@ class SaleOrder(models.Model):
             vals.update({'ohmyfin_check_state': 'not_screened', 'ohmyfin_check_reason': exc.reason,
                          'ohmyfin_check_json': False, 'ohmyfin_check_id': False,
                          'ohmyfin_checked_at': fields.Datetime.now()})
-            self.write(vals)
+            self.sudo().write(vals)
             self.message_post(body=words.order_chatter('not_screened', {}, exc.reason, confirmed=go and confirming))
             return go
 
@@ -215,7 +265,7 @@ class SaleOrder(models.Model):
             reason = 'the service sent an answer that could not be read'
             vals.update({'ohmyfin_check_state': 'not_screened', 'ohmyfin_check_reason': reason,
                          'ohmyfin_check_json': False, 'ohmyfin_checked_at': fields.Datetime.now()})
-            self.write(vals)
+            self.sudo().write(vals)
             self.message_post(body=words.order_chatter('not_screened', {}, reason, confirmed=go and confirming))
             return go
 
@@ -226,7 +276,7 @@ class SaleOrder(models.Model):
             'ohmyfin_check_id': result.get('check_id') or False,
             'ohmyfin_checked_at': fields.Datetime.now(),
         })
-        self.write(vals)
+        self.sudo().write(vals)
         self.message_post(body=words.order_chatter(state, result))
         return state == 'no_findings'
 
@@ -262,7 +312,8 @@ class SaleOrder(models.Model):
         self.ensure_one()
         if self.ohmyfin_check_state != 'review':
             raise UserError(_('Only an order waiting for a compliance reviewer can be released.'))
-        self.write({
+        # Through sudo(): the caller's take_reason() has checked the reviewer group.
+        self.sudo().write({
             'ohmyfin_check_state': 'released',
             'ohmyfin_review_reason': reason,
             'ohmyfin_reviewed_by': self.env.user.id,
