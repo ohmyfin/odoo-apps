@@ -3,7 +3,7 @@
     # The source carries x.y.z, which every Odoo series reads as <series>.x.y.z.
     # integrations/odoo/publish.sh writes the full 18.0.1.0.0 / 19.0.1.0.0 /
     # 20.0.1.0.0 into each store branch, as the store wants it spelled out.
-    'version': '20.0.1.1.1',
+    'version': '20.0.1.1.2',
     'summary': 'Trade compliance on the sales order: sanctions and OFAC denied party screening of '
                'the customer, embargo and Russia (Art. 12g) checks of the destination, export '
                'control and dual-use goods check by HS code. Needs an Ohmyfin account.',

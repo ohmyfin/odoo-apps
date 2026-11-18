@@ -2,9 +2,9 @@
 (tests/test_words.py) reads them all.
 
 PRD 0022 §4.7, binding: never "clear", "cleared", "safe", "verified" or "compliant"; a no-match
-is "No match on N lists, <date>"; a reviewed potential match stays grey, never green; a goods
-result is a flag to check the item's classification, never a licence determination. "BIC", not
-the other name. Nothing about tracking.
+is "No match on N lists, <date>"; a reviewed potential match and an information-only party
+stay grey, never green; a goods result is a flag to check the item's classification, never a
+licence determination. "BIC", not the other name. Nothing about tracking.
 """
 import json
 import re
@@ -18,6 +18,11 @@ PARTY_LABELS = {
     'potential_match': 'Potential match',
     'listed': 'Listed',
     'not_screened': 'Not screened',
+    # Only an order answer's party reads this (1.1.2): `information_only: true`, its hits all
+    # MONITOR or INFORM level (an export-enforcement record, adverse media, a PEP or lobbyist
+    # register). Shown with its matches like a potential match, never green, and it holds
+    # nothing: `decision` does.
+    'information_only': 'Information only (no hold)',
 }
 
 DECISION_LABELS = {
@@ -38,6 +43,26 @@ GOODS_LABELS = {
     'not_accepted': 'Not goods-screened: the service did not accept this HS code',
     'no_classification': 'Not goods-screened: no classification is held for this HS code',
 }
+
+# goods.license_status (sent since 17/11/2026), the finer word for a screened line. Worded by
+# it when present; 'prohibited' and 'not_required' keep the goods.status words (never "no
+# licence required": a goods result is a flag, never a licence determination). An answer
+# without it words by goods.status alone, as 1.1.1 did.
+LICENSE_STATUS_LABELS = {
+    'required': "Licence may be required: check the item's classification",
+    'depends_on_classification': 'Classify the item: it may be controlled depending on its specification',
+    'country_advisory': 'Destination advice: no control-list entry covers this item; see the reasons above',
+}
+
+SERVICE_LICENSE_STATUS_LABELS = {
+    'required': 'Licence may be required for this service: check what it covers',
+    'depends_on_classification': 'Check what the service covers: it may be controlled depending on its scope',
+    'country_advisory': 'Destination advice: no control-list entry covers this service; see the reasons above',
+}
+
+# The goods.status values of a line that was not screened: these word by status, whatever
+# license_status says.
+NOT_SCREENED_STATUSES = ('not_goods_screened', 'invalid_code', 'not_accepted', 'no_classification')
 
 # A service line (changes/0051): the same statuses as goods, worded as a service. The line's
 # service type is filled in for 'not_goods_screened' ("service type 'x' is not screened").
@@ -174,10 +199,41 @@ def load(text):
     return data if isinstance(data, dict) else {}
 
 
+def party_answer_state(party):
+    """The state of a party in an order answer: the server's `state`, or the module's three
+    words from the verdict. Since 1.1.2 a party carries `information_only: true` (with state
+    potential_match) when every hit is MONITOR or INFORM level: it then reads
+    'information_only'. A listed party is never softened, and an older answer, which has no
+    such key, reads exactly as before."""
+    party = party or {}
+    state = party.get('state') or party_state(party.get('verdict'), party.get('total_matches'))
+    if party.get('information_only') is True and state != 'listed':
+        return 'information_only'
+    return state
+
+
+def information_only_text(result):
+    """"Customer: Information only (no hold): <top matches>." per such party of an order
+    answer, for the chatter. The ship-to is left out when it is the customer."""
+    out = []
+    for role, key in (('Customer', 'customer'), ('Ship-to', 'ship_to')):
+        party = (result or {}).get(key)
+        if not isinstance(party, dict) or party_answer_state(party) != 'information_only':
+            continue
+        if key == 'ship_to' and party.get('same_as_customer'):
+            continue
+        text = '%s: %s' % (role, PARTY_LABELS['information_only'])
+        lines = match_lines(party.get('matches'), 3)
+        if lines:
+            text += ': %s' % '; '.join(lines)
+        out.append(text + '.')
+    return ' '.join(out)
+
+
 def _party_text(env, party, lists_count, checked_at):
     if not party:
         return 'Not screened'
-    state = party.get('state') or party_state(party.get('verdict'), party.get('total_matches'))
+    state = party_answer_state(party)
     text = badge(env, state, checked_at, lists_count)
     lines = match_lines(party.get('matches'), 3)
     if lines and state != 'no_match':
@@ -194,10 +250,13 @@ def order_chatter(decision, result, reason=None, confirmed=None):
                 else 'The order was not confirmed: "refuse when the check cannot run" is on.')
         return 'Trade check not run%s: not screened: %s. %s' % (ref, reason or 'the check could not run', tail)
     reasons = list(result.get('refusal_reasons') or []) + list(result.get('review_reasons') or [])
+    info = information_only_text(result)
     if decision == 'refused':
-        return 'Trade check%s: confirm refused. %s' % (ref, ' '.join(result.get('refusal_reasons') or []))
+        return ('Trade check%s: confirm refused. %s %s' % (
+            ref, ' '.join(result.get('refusal_reasons') or []), info)).strip()
     if decision == 'review':
-        return ('Trade check%s: waiting for a compliance reviewer. %s' % (ref, ' '.join(result.get('review_reasons') or []))).strip()
+        return ('Trade check%s: waiting for a compliance reviewer. %s %s' % (
+            ref, ' '.join(result.get('review_reasons') or []), info)).strip()
     lines = result.get('lines') or []
     # By the line's STATE, not by whether it carries a code: since 01/11/2026 a
     # coded line can still come back not goods-screened, because Ohmyfin holds no
@@ -213,6 +272,8 @@ def order_chatter(decision, result, reason=None, confirmed=None):
     text += '.'
     if reasons:
         text += ' ' + ' '.join(reasons)
+    if info:
+        text += ' ' + info
     return text
 
 
@@ -256,15 +317,21 @@ def line_result_text(line):
     """The goods or service result of one answer line, as shown in the panel."""
     goods = line.get('goods') if isinstance(line.get('goods'), dict) else {}
     status = goods.get('status')
+    # By goods.license_status when the server sends it (1.1.2), on a screened line that is not
+    # prohibited; otherwise by goods.status, exactly as 1.1.1 did.
+    license_status = goods.get('license_status') \
+        if status not in NOT_SCREENED_STATUSES and status != 'prohibited' else None
     if line_kind(line) == 'service':
         text = SERVICE_LABELS.get(status, status or '')
-        if status == 'not_goods_screened':
+        if license_status in SERVICE_LICENSE_STATUS_LABELS:
+            text = SERVICE_LICENSE_STATUS_LABELS[license_status]
+        elif status == 'not_goods_screened':
             text = text % service_type_label(line.get('service_type')).lower()
         elif status in ('not_accepted', 'no_classification') and goods.get('reason'):
             # The server says why (e.g. it does not screen this service type yet).
             text = 'Not screened: %s' % goods['reason'].rstrip('.')
     else:
-        text = GOODS_LABELS.get(status, status or '')
+        text = LICENSE_STATUS_LABELS.get(license_status) or GOODS_LABELS.get(status, status or '')
     if status == 'licence_may_be_required' and goods.get('jurisdictions_requiring_license'):
         text += ' (%s)' % ', '.join(goods['jurisdictions_requiring_license'])
     return text

@@ -42,11 +42,21 @@ def screen_answer(name):
     }
 
 
-def party(name, country, state='no_match', same=False):
+def party(name, country, state='no_match', same=False, information_only=None):
+    """One party of the answer. ``information_only`` True or False answers as the 1.1.2 server
+    does (every party carries the key; an information-only party is state potential_match with
+    every hit at MONITOR or INFORM level); None answers as an older server, without the key."""
     verdict = {'no_match': 'CLEAR', 'potential_match': 'REVIEW', 'listed': 'BLOCK'}[state]
     matches = [] if state == 'no_match' else [{'name': name, 'list_name': 'EU Consolidated List', 'match_score': 0.9}]
-    return {'name': name, 'country': country, 'verdict': verdict, 'total_matches': len(matches), 'lists': [],
-            'matches': matches, 'state': state, 'same_as_customer': same}
+    if information_only:
+        verdict = 'MONITOR'
+        matches = [{'name': name, 'list_source': 'US-BIS-ENFORCEMENT', 'list_name': 'BIS export enforcement record',
+                    'match_score': 0.88, 'action': 'MONITOR'}]
+    out = {'name': name, 'country': country, 'verdict': verdict, 'total_matches': len(matches), 'lists': [],
+           'matches': matches, 'state': state, 'same_as_customer': same}
+    if information_only is not None:
+        out['information_only'] = information_only
+    return out
 
 
 REGIMES = {
@@ -69,7 +79,13 @@ POSSIBLE_CONTROLS = [
 def trade_answer(payload, case='no_findings'):
     """The /api/v5/trade/check answer for one fixture case, line by line from the request.
     Since changes/0051 a line may carry `service_type` instead of `hs_code`, every answer line
-    carries `kind`, and the destination may carry `regimes` (case 'regimes')."""
+    carries `kind`, and the destination may carry `regimes` (case 'regimes').
+    Since 17/11/2026 a screened goods line carries `goods.license_status`; the cases
+    'country_advisory' (as the live server answers B5), 'depends' and 'required' send it, the
+    others answer as an older server did, without it. Case 'information_only' (1.1.2): the
+    customer is state potential_match with `information_only: true`, its hits all MONITOR level;
+    it holds nothing (decision no_findings) and is a sentence in `notes`. Those four cases carry
+    `information_only` on every party, as the 1.1.2 server does; the others do not."""
     customer = payload['customer']
     ship = payload['ship_to']
     lines = []
@@ -112,6 +128,27 @@ def trade_answer(payload, case='no_findings'):
             goods.update(status='licence_may_be_required', jurisdictions_requiring_license=['EU', 'US'])
             state = 'review'
             reviews.append("Line 1 (HS %s): an export licence may be required for %s (EU, US); check the item's classification." % (hs, ship['country']))
+        if case == 'country_advisory' and n == 1:
+            # B5: no control-list entry, but the destination carries an advisory; the server
+            # holds the order by `decision`, and the line itself says no_flag.
+            goods.update(status='no_flag', license_status='country_advisory', classification='not_listed')
+            state = 'review'
+            reviews.append('Line 1 (HS %s): exports to %s carry a destination advisory; check the end use and '
+                           'end user before it ships.' % (hs, ship['country']))
+        if case == 'depends' and n == 1:
+            goods.update(status='licence_may_be_required', license_status='depends_on_classification',
+                         classification='possibly_controlled', jurisdictions_requiring_license=['EU'])
+            state = 'review'
+            reviews.append("Line 1 (HS %s): the item may be controlled depending on its specification; classify "
+                           "it before it ships." % hs)
+        if case == 'required' and n == 1:
+            goods.update(status='licence_may_be_required', license_status='required', classification='controlled',
+                         jurisdictions_requiring_license=['EU', 'US'])
+            state = 'review'
+            reviews.append("Line 1 (HS %s): an export licence may be required for %s (EU, US); check the item's "
+                           "classification." % (hs, ship['country']))
+        if case in ('country_advisory', 'depends', 'required') and n > 1:
+            goods['license_status'] = 'not_required'
         if case == 'chp_r2' and n == 1:
             chp = {'status': 'enhanced_due_diligence', 'rule': 'chp_to_third_country', 'hs6': hs[:6], 'tier': '1',
                    'list_version': 'Version of February 2024',
@@ -122,7 +159,15 @@ def trade_answer(payload, case='no_findings'):
         lines.append({'line': n, 'hs_code': hs, 'service_type': None, 'kind': 'goods',
                       'country_of_origin': line.get('country_of_origin'), 'state': state, 'goods': goods, 'chp': chp})
 
-    cust_state = 'listed' if case == 'listed' else ('potential_match' if case == 'potential' else 'no_match')
+    cust_state = {'listed': 'listed', 'potential': 'potential_match',
+                  'information_only': 'potential_match'}.get(case, 'no_match')
+    # The 1.1.2 server's cases carry `information_only` on every party; the others do not.
+    new_server = case in ('information_only', 'country_advisory', 'depends', 'required')
+    cust_info = (case == 'information_only') if new_server else None
+    notes = []
+    if case == 'information_only':
+        notes.append('For information: the customer appears in a BIS export enforcement record (MONITOR); '
+                     'this does not hold the order.')
     if case == 'listed':
         refusals.append('The customer matches a sanctions list entry at BLOCK level (OFAC SDN).')
     if case == 'potential':
@@ -142,10 +187,10 @@ def trade_answer(payload, case='no_findings'):
         'decision': decision,
         'refusal_reasons': refusals,
         'review_reasons': reviews,
-        'notes': [],
+        'notes': notes,
         'lists_searched': 312,
-        'customer': party(customer['name'], customer['country'], cust_state),
-        'ship_to': party(ship['name'], ship['country'], 'no_match', same),
+        'customer': party(customer['name'], customer['country'], cust_state, information_only=cust_info),
+        'ship_to': party(ship['name'], ship['country'], 'no_match', same, information_only=False if new_server else None),
         'origin_country': payload.get('origin_country'),
         'destination': destination,
         'country_controls': [],
