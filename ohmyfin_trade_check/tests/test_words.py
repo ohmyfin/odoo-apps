@@ -98,7 +98,7 @@ class TestWords(OhmyfinCase):
                    'origin_country': 'DE', 'lines': [{'hs_code': '854231'}, {'hs_code': '847130'}, {},
                                                      {'service_type': 'engineering'}, {'service_type': 'other_service'}]}
         for case in ('no_findings', 'listed', 'potential', 'embargoed', 'prohibited_goods', 'licence', 'chp_r2',
-                     'possible_controls', 'regimes'):
+                     'possible_controls', 'regimes', 'information_only', 'country_advisory', 'depends', 'required'):
             result = trade_answer(payload, case)
             for state in ('none', 'no_findings', 'review', 'released', 'refused', 'not_screened'):
                 rendered.append(str(words.order_panel(self.env, state, result, {
@@ -110,6 +110,13 @@ class TestWords(OhmyfinCase):
             rendered.append(chp)
         rendered.extend(words.GOODS_LABELS.values())
         rendered.extend(words.SERVICE_LABELS.values())
+        rendered.extend(words.LICENSE_STATUS_LABELS.values())
+        rendered.extend(words.SERVICE_LICENSE_STATUS_LABELS.values())
+        for kind in ('goods', 'service'):
+            for license_status in LICENSE_STATUSES:
+                rendered.append(words.line_result_text({'kind': kind, 'service_type': 'engineering', 'goods': {
+                    'status': 'no_flag', 'license_status': license_status,
+                    'jurisdictions_requiring_license': ['EU']}}))
         rendered.extend(words.CLASSIFICATION_LABELS.values())
         rendered.extend(label for _key, label in words.SERVICE_TYPES)
         for status in words.SERVICE_LABELS:
@@ -120,7 +127,7 @@ class TestWords(OhmyfinCase):
             words.order_chatter('not_screened', {}, 'the service did not answer in time', confirmed=False),
             words.release_note('DEMO Reviewer', 'Different entity.', 'TC-1'),
         ])
-        for state in ('no_match', 'potential_match', 'listed', 'not_screened'):
+        for state in ('no_match', 'potential_match', 'listed', 'not_screened', 'information_only'):
             rendered.append(words.badge(self.env, state, now, 312, 'the API key was refused', reviewer='DEMO Reviewer'))
             rendered.append(words.contact_note(self.env, state, 'SCR-1', now, 312,
                                                [{'name': 'X', 'list_name': 'EU Consolidated List', 'match_score': 0.9}],
@@ -240,6 +247,119 @@ class TestWords(OhmyfinCase):
             {'line_names': {'3': 'DEMO Engineering consulting'}}))
         self.assertIn('Not screened: The export-control service does not screen this service type yet (HTTP 422)', panel)
         self.assertEqual(hits(panel), [])
+
+    # ── 1.1.2: goods.license_status and the information-only party ───────────────────────
+
+    def test_goods_wording_by_license_status(self):
+        def text(status, license_status, kind='goods', **goods):
+            return words.line_result_text({'kind': kind, 'service_type': 'engineering', 'goods': dict(
+                goods, status=status, license_status=license_status)})
+        # country_advisory now comes with goods.status no_flag (it used to be licence_may_be_required).
+        self.assertEqual(text('no_flag', 'country_advisory'),
+                         'Destination advice: no control-list entry covers this item; see the reasons above')
+        self.assertEqual(text('licence_may_be_required', 'depends_on_classification'),
+                         'Classify the item: it may be controlled depending on its specification')
+        self.assertEqual(text('licence_may_be_required', 'required', jurisdictions_requiring_license=['EU', 'US']),
+                         "Licence may be required: check the item's classification (EU, US)")
+        self.assertEqual(text('prohibited', 'prohibited'), 'Prohibited for this destination')
+        # not_required keeps the flag wording: never a licence determination.
+        self.assertEqual(text('no_flag', 'not_required'), 'No flag on the export-control lists')
+        # A line that was not screened words by its status, whatever license_status says.
+        self.assertEqual(text('not_goods_screened', 'country_advisory'), 'Not goods-screened: no HS code')
+        self.assertEqual(text('prohibited', 'country_advisory'), 'Prohibited for this destination')
+        # Services, worded as a service.
+        self.assertEqual(text('no_flag', 'country_advisory', 'service'),
+                         'Destination advice: no control-list entry covers this service; see the reasons above')
+        self.assertEqual(text('licence_may_be_required', 'depends_on_classification', 'service'),
+                         'Check what the service covers: it may be controlled depending on its scope')
+        self.assertEqual(text('licence_may_be_required', 'required', 'service', jurisdictions_requiring_license=['EU']),
+                         'Licence may be required for this service: check what it covers (EU)')
+        self.assertEqual(text('prohibited', 'prohibited', 'service'), 'Service prohibited for this destination')
+        self.assertEqual(text('no_flag', 'not_required', 'service'), 'Service screened: no flag')
+        # An unknown value from a newer server falls back to the status words.
+        self.assertEqual(text('no_flag', 'something_new'), 'No flag on the export-control lists')
+        for kind in ('goods', 'service'):
+            for license_status in LICENSE_STATUSES:
+                self.assertEqual(hits(text('no_flag', license_status, kind)), [])
+
+    def test_answer_without_license_status_words_as_1_1_1(self):
+        expected = {
+            'prohibited': 'Prohibited for this destination',
+            'licence_may_be_required': "Licence may be required: check the item's classification (EU, US)",
+            'no_flag': 'No flag on the export-control lists',
+            'not_goods_screened': 'Not goods-screened: no HS code',
+            'not_accepted': 'Not goods-screened: the service did not accept this HS code',
+            'no_classification': 'Not goods-screened: no classification is held for this HS code',
+        }
+        for status, text in expected.items():
+            line = {'kind': 'goods', 'goods': {'status': status, 'jurisdictions_requiring_license': ['EU', 'US']}}
+            self.assertEqual(words.line_result_text(line), text, status)
+        service = {'kind': 'service', 'service_type': 'engineering',
+                   'goods': {'status': 'licence_may_be_required', 'jurisdictions_requiring_license': ['EU']}}
+        self.assertEqual(words.line_result_text(service), 'Licence may be required for this service: check what it covers (EU)')
+        # The fixture's older-server answer: no line carries license_status, the panel reads as before.
+        payload = {'customer': {'name': 'DEMO A', 'country': 'KZ'}, 'ship_to': {'name': 'DEMO A', 'country': 'KZ'},
+                   'lines': [{'hs_code': '854231'}]}
+        result = trade_answer(payload, 'licence')
+        self.assertNotIn('license_status', result['lines'][0]['goods'])
+        panel = str(words.order_panel(self.env, 'review', result)).replace('&#39;', "'")
+        self.assertIn("Licence may be required: check the item's classification (EU, US)", panel)
+
+    def test_information_only_party_label(self):
+        now = datetime(2026, 10, 23, 8, 0)
+        self.assertEqual(words.PARTY_LABELS['information_only'], 'Information only (no hold)')
+        self.assertTrue(words.badge(self.env, 'information_only', now, 312).startswith('Information only (no hold), '))
+        # The contact and payee screens keep their three words: a MONITOR verdict is a potential match there.
+        self.assertEqual(words.party_state('MONITOR', 1), 'potential_match')
+        self.assertEqual(words.party_state('INFORM', 1), 'potential_match')
+        payload = {'customer': {'name': 'DEMO Info Co', 'country': 'KZ'}, 'ship_to': {'name': 'DEMO Info Co', 'country': 'KZ'},
+                   'lines': [{'hs_code': '854231'}]}
+        result = trade_answer(payload, 'information_only')
+        self.assertEqual(result['decision'], 'no_findings')
+        panel = str(words.order_panel(self.env, 'no_findings', result, {'checked_at': now}))
+        self.assertIn('Information only (no hold), ', panel)
+        self.assertIn('DEMO Info Co (BIS export enforcement record, score 0.88)', panel)
+        self.assertIn('BIS export enforcement record (MONITOR)', panel)   # the server's note
+        self.assertNotIn('Potential match', panel)
+        self.assertNotIn('green', panel.lower())
+        chatter = words.order_chatter('no_findings', result)
+        self.assertIn('no findings', chatter)
+        self.assertIn('Customer: Information only (no hold): DEMO Info Co (BIS export enforcement record, score 0.88).',
+                      chatter)
+        self.assertNotIn('Ship-to:', chatter, 'the ship-to is the customer: said once')
+        # A ship-to of its own is named; and the line rides a held order's chatter too.
+        result['ship_to'] = dict(result['customer'], name='DEMO Ship Co', same_as_customer=False)
+        self.assertIn('Ship-to: Information only (no hold): ', words.order_chatter('review', result))
+        self.assertIn('Ship-to: Information only (no hold): ', words.order_chatter('refused', result))
+        self.assertEqual(hits(panel + chatter), [])
+
+    def test_information_only_is_read_from_the_boolean(self):
+        """The 1.1.2 server keeps the 1.1.1 states: an information-only party is state
+        potential_match plus `information_only: true`; every party carries the key, an older
+        answer has none."""
+        result = trade_answer({'customer': {'name': 'DEMO Info Co', 'country': 'KZ'},
+                               'ship_to': {'name': 'DEMO Info Co', 'country': 'KZ'}, 'lines': []}, 'information_only')
+        self.assertEqual(result['customer']['state'], 'potential_match')
+        self.assertIs(result['customer']['information_only'], True)
+        self.assertIs(result['ship_to']['information_only'], False)
+        state = words.party_answer_state
+        self.assertEqual(state({'state': 'potential_match', 'information_only': True}), 'information_only')
+        self.assertEqual(state({'state': 'potential_match', 'information_only': False}), 'potential_match')
+        self.assertEqual(state({'state': 'potential_match'}), 'potential_match', 'an older answer reads as before')
+        self.assertEqual(state({'state': 'potential_match', 'information_only': 'yes'}), 'potential_match',
+                         'only a JSON true counts')
+        self.assertEqual(state({'state': 'information_only'}), 'information_only')
+        self.assertEqual(state({'state': 'listed', 'information_only': True}), 'listed', 'a listing is never softened')
+        self.assertEqual(state({'verdict': 'MONITOR', 'total_matches': 1, 'information_only': True}), 'information_only')
+        # The panel says the label, not "Potential match"; an older answer still says "Potential match".
+        older = trade_answer({'customer': {'name': 'DEMO P', 'country': 'KZ'},
+                              'ship_to': {'name': 'DEMO P', 'country': 'KZ'}, 'lines': []}, 'potential')
+        self.assertNotIn('information_only', older['customer'])
+        self.assertIn('Potential match', str(words.order_panel(self.env, 'review', older)))
+        self.assertNotIn('Information only', words.order_chatter('review', older))
+
+
+LICENSE_STATUSES = ('prohibited', 'required', 'depends_on_classification', 'country_advisory', 'not_required')
 
 
 REGIMES_SUMMARY = {

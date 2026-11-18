@@ -5,6 +5,8 @@ non-reviewer cannot record one), and AC 1's two shapes (with and without stock_d
 changes/0053 (1.1.1): a plain salesperson, the user the hold is for, cannot skip it: not by
 writing the check's state or fingerprint, not by creating or copying an order that carries them,
 not through a context default or a personal default, not with a context key."""
+import json
+
 import requests
 
 from odoo.exceptions import AccessError
@@ -208,6 +210,48 @@ class TestOrderCheck(OhmyfinCase):
         html = order.ohmyfin_check_html
         self.assertIn('No match on 312 lists', html)
         self.assertIn('Report TC-01JTESTCHECK', html)
+
+    # ── 1.1.2: the information-only party and goods.license_status ─────────────────────────
+
+    def test_information_only_customer_confirms(self):
+        """A party whose hits are all MONITOR or INFORM level holds nothing: `decision` does."""
+        order = self.make_order()
+        self._confirm(order, 'information_only')
+        self.assertEqual(order.state, 'sale')
+        self.assertEqual(order.ohmyfin_check_state, 'no_findings')
+        html = order.ohmyfin_check_html
+        self.assertIn('Information only (no hold), ', html)
+        self.assertIn('BIS export enforcement record, score 0.88', html)
+        self.assertNotIn('Potential match', html)
+        note = self.last_message(order)
+        self.assertIn('no findings', note)
+        self.assertIn('Customer: Information only (no hold): DEMO Almaty Distribution LLP', note)
+
+    def test_destination_advice_waits_for_a_reviewer(self):
+        """B5's shape: decision review_required, the line goods.status no_flag with license_status
+        country_advisory. The order waits, by `decision`, and the line reads as advice."""
+        self._needs_goods()
+        order = self._assert_waiting('country_advisory', 'destination advisory')
+        goods = json.loads(order.ohmyfin_check_json)['lines'][0]['goods']
+        self.assertEqual((goods['status'], goods['license_status']), ('no_flag', 'country_advisory'))
+        html = order.ohmyfin_check_html
+        self.assertIn('Destination advice: no control-list entry covers this item; see the reasons above', html)
+        self.assertIn('To review', html)
+        self.assertNotIn('Licence may be required', html)
+
+    def test_classify_the_item_waits(self):
+        self._needs_goods()
+        order = self._assert_waiting('depends', 'classify it before it ships')
+        html = order.ohmyfin_check_html
+        self.assertIn('Classify the item: it may be controlled depending on its specification', html)
+
+    def test_licence_required_by_license_status_waits(self):
+        self._needs_goods()
+        order = self._assert_waiting('required', 'licence may be required')
+        html = order.ohmyfin_check_html.replace('&#39;', "'")
+        self.assertIn("Licence may be required: check the item's classification (EU, US)", html)
+        # The other coded line says not_required: still the flag words, never a licence determination.
+        self.assertIn('No flag on the export-control lists', html)
 
     def test_line_without_hs_code_reads_not_goods_screened(self):
         order = self.make_order()
